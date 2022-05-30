@@ -1,13 +1,3 @@
-
-variable "cidr_block" {
-  description = "This is list of object variable which holds all cidr_block values"
-  type = list(object({
-    cidr_block = string
-    name = string
-  }))  
-}
-variable "ec2_public_key" {}
-
 resource "aws_vpc" "festine-tf-vpc" {
   cidr_block = var.cidr_block[0].cidr_block
 
@@ -53,31 +43,25 @@ resource "aws_route_table_association" "subnet" {
   route_table_id = aws_route_table.tf-route-table.id
 }
 
+# locals {
+#   ports-in = [for item in var.ports : {"port" = item["port"], "tag" = item["tag"]}]
+# }
+
 resource "aws_security_group" "festine-tf-SG" {
   name = "festine-tf-SG"
   description = "Security group for VMs created by Terraform"
   vpc_id = aws_vpc.festine-tf-vpc.id
 
-  ingress {
-    description = "Allow HTTPS connection from everywhere"
-    from_port = 443
-    to_port = 443
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "Allow HTTP connection from everywhere"
-    from_port = 80
-    to_port = 80
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "Allow ssh connection from my base machine"
-    from_port = 22
-    to_port = 22
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] #this will only accept ssh from my base machine
+  dynamic "ingress" {
+    for_each = var.ports
+
+    content {
+      description = ingress.value["tag"]
+      from_port = ingress.value["port"]
+      to_port = ingress.value["port"]
+      protocol = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
 
   egress {
@@ -111,12 +95,9 @@ data "aws_ami" "ubuntu" {
 
 resource "aws_key_pair" "festine-tf-key-pair" {
   key_name = "festine-tf-key-pair"
-  public_key = var.ec2_public_key
+  public_key = file("${var.pub_key}")
 }
 
-output "aws_ami_id" {
-  value = data.aws_ami.ubuntu.id
-}
 
 resource "aws_instance" "festine-tf-ec2" {
   instance_type = "t3.micro"
@@ -128,7 +109,7 @@ resource "aws_instance" "festine-tf-ec2" {
   connection {
     type = "ssh"
     user = "ubuntu"
-    private_key = file("~/.ssh/id_rsa")
+    private_key = file("${var.priv_key}")
     host = self.public_ip
   }
 
@@ -149,6 +130,40 @@ resource "aws_instance" "festine-tf-ec2" {
   }
 }
 
-output "aws_public_ip" {
-  value = aws_instance.festine-tf-ec2.public_ip
+
+
+# this is used to create an S3 bucket and a DynamoDB for managing terraform.tfstate file.
+resource "aws_s3_bucket" "backend" {
+  bucket = "festine-tf-985729960198-bucket"
+  
+  tags = {
+    Name = "festine-tf-985729960198-bucket"
+    Environment = "dev"
+  }
+}
+
+resource "aws_s3_bucket_acl" "pub" {
+  bucket = aws_s3_bucket.backend.id
+  acl = "public-read-write"
+}
+
+resource "aws_s3_bucket_versioning" "my-versioning" {
+  bucket = aws_s3_bucket.backend.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# the dynamodb is used for stat locking so that it only allows one access at a time
+resource "aws_dynamodb_table" "state-lock-tbl" {
+  name = "tfstate-lock"
+  hash_key ="LockID"
+  billing_mode = "PROVISIONED"
+  read_capacity = 1
+  write_capacity = 1
+
+  attribute {
+    name = "LockID"
+    type = "S"
+  }
 }
